@@ -1,164 +1,291 @@
-import { Client, GatewayIntentBits, Partials, Events, Message } from "discord.js";
-import { pgTable, text, integer } from "drizzle-orm/pg-core";
-import { drizzle } from "drizzle-orm/node-postgres";
-import pg from "pg";
-import { eq } from "drizzle-orm";
+import { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionsBitField, ChannelType } from 'discord.js';
 
-// --- Database Schema ---
-const roleLimits = pgTable("role_limits", {
-  roleId: text("role_id").primaryKey(),
-  limitAmount: integer("limit_amount").notNull(),
-});
-
-const userUsage = pgTable("user_usage", {
-  userId: text("user_id").primaryKey(),
-  usageAmount: integer("usage_amount").default(0).notNull(),
-});
-
-const botAdmins = pgTable("bot_admins", {
-  userId: text("user_id").primaryKey(),
-});
-
-// --- Database Initialization ---
-const { Pool } = pg;
-if (!process.env.DATABASE_URL) {
-  throw new Error("DATABASE_URL must be set.");
-}
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const db = drizzle(pool, { schema: { roleLimits, userUsage, botAdmins } });
-
-// --- Storage Logic ---
-const storage = {
-  async getRoleLimit(roleId) {
-    const [limit] = await db.select().from(roleLimits).where(eq(roleLimits.roleId, roleId));
-    return limit;
-  },
-  async setRoleLimit(roleId, limit) {
-    const [result] = await db.insert(roleLimits).values({ roleId, limitAmount: limit })
-      .onConflictDoUpdate({ target: roleLimits.roleId, set: { limitAmount: limit } }).returning();
-    return result;
-  },
-  async getUserUsage(userId) {
-    const [usage] = await db.select().from(userUsage).where(eq(userUsage.userId, userId));
-    return usage;
-  },
-  async setUserUsage(userId, amount) {
-    const [result] = await db.insert(userUsage).values({ userId, usageAmount: amount })
-      .onConflictDoUpdate({ target: userUsage.userId, set: { usageAmount: amount } }).returning();
-    return result;
-  },
-  async addToUserUsage(userId, amount) {
-    const current = await this.getUserUsage(userId);
-    const newAmount = (current?.usageAmount || 0) + amount;
-    return this.setUserUsage(userId, newAmount);
-  },
-  async getAdmin(userId) {
-    const [admin] = await db.select().from(botAdmins).where(eq(botAdmins.userId, userId));
-    return admin;
-  },
-  async addAdmin(userId) {
-    const [result] = await db.insert(botAdmins).values({ userId }).onConflictDoNothing().returning();
-    if (!result) return this.getAdmin(userId);
-    return result;
-  }
-};
-
-// --- Bot Logic ---
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMembers],
-  partials: [Partials.Channel, Partials.Message],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers
+  ]
 });
 
-async function isOwner(userId) {
-  const app = await client.application?.fetch();
-  return app?.owner?.id === userId;
+// ────────────────────────────────────────────────
+//  CONFIG
+// ────────────────────────────────────────────────
+const REQUIRED_ROLE_ID      = '1465061909668565038';
+const HITTER_ROLE_ID        = '1465061911329767477';
+const WELCOME_CHANNEL_ID    = '1465062011380437216';
+
+const TRIGGER_CMD           = '+trigger';
+const FEE_CMD               = '+fee';
+const CONFIRM_CMD           = '+confirm';
+const VOUCHES_CMD           = '+vouches';
+const SET_VOUCHES_CMD       = '+setvouches';
+const AFK_CMD               = '+afk';
+
+// ────────────────────────────────────────────────
+//  STORAGE (memory only – resets on restart)
+// ────────────────────────────────────────────────
+const feeChoices    = new Set();
+const confirmChoices = new Set();
+const vouchCounts   = new Map();           // userId → number
+const afkUsers      = new Map();           // userId → { originalNickname, reason }
+
+// ────────────────────────────────────────────────
+//  HELPERS
+// ────────────────────────────────────────────────
+function hasPermission(member) {
+  return member?.roles.cache.has(REQUIRED_ROLE_ID);
 }
 
-async function isAdmin(userId) {
-  if (await isOwner(userId)) return true;
-  const admin = await storage.getAdmin(userId);
-  return !!admin;
+function getVouches(userId) {
+  if (!vouchCounts.has(userId)) {
+    const fake = Math.floor(Math.random() * 4501) + 500; // 500–5000
+    vouchCounts.set(userId, fake);
+  }
+  return vouchCounts.get(userId);
 }
 
-client.once(Events.ClientReady, (c) => console.log(`Ready! Logged in as ${c.user.tag}`));
+// ────────────────────────────────────────────────
+//  READY
+// ────────────────────────────────────────────────
+client.once('ready', () => {
+  console.log(`Logged in as ${client.user.tag}`);
+  console.log('Commands restricted to role:', REQUIRED_ROLE_ID);
+});
 
-const PREFIX = ".";
+// ────────────────────────────────────────────────
+//  MESSAGE CREATE – commands + AFK removal
+// ────────────────────────────────────────────────
+client.on('messageCreate', async message => {
+  if (message.author.bot) return;
 
-client.on(Events.MessageCreate, async (message) => {
-  if (message.author.bot || !message.content.startsWith(PREFIX) || !message.guild) return;
+  const content = message.content.toLowerCase().trim();
+  const member = message.member;
 
-  const args = message.content.slice(PREFIX.length).trim().split(/ +/);
-  const command = args.shift()?.toLowerCase();
-  if (!command) return;
+  // ─── AFK removal (works for everyone) ────────────────────────────────
+  if (afkUsers.has(member.id)) {
+    try {
+      const data = afkUsers.get(member.id);
+      await member.setNickname(data.originalNickname);
+      afkUsers.delete(member.id);
 
-  try {
-    if (command === "limit") {
-      if (!(await isAdmin(message.author.id))) return message.reply("❌ Permission Denied.");
-      const roleMention = args[0], amount = parseInt(args[1]);
-      if (!roleMention || isNaN(amount)) return message.reply("⚠️ Usage: `.limit @Role <amount>`");
-      const roleId = roleMention.match(/^<@&?(\d+)>$/)?.[1] || roleMention;
-      const role = message.guild.roles.cache.get(roleId);
-      if (!role) return message.reply("❌ Role not found.");
-      await storage.setRoleLimit(roleId, amount);
-      await message.reply({ embeds: [{ color: 0xffcc00, title: "⚙️ System Configuration", description: `Role limits recalibrated for **${role.name}**`, fields: [{ name: "📏 Target Limit", value: `\`${amount}\``, inline: true }], thumbnail: { url: "https://i.imgur.com/p8v0Dk6.gif" }, footer: { text: "Real-time Update applied" } }] });
-    } else if (command === "checklimit") {
-      let targetId = message.author.id;
-      const userIdMatch = args[0]?.match(/^<@!?(\d+)>$/);
-      if (userIdMatch) targetId = userIdMatch[1];
-      const member = message.guild.members.cache.get(targetId);
-      if (!member) return message.reply("Member not found.");
-      const userUsageData = await storage.getUserUsage(targetId);
-      const usage = userUsageData?.usageAmount || 0;
-      let maxLimit = 0, limitingRole = null;
-      for (const [roleId, role] of member.roles.cache) {
-        const limitRecord = await storage.getRoleLimit(roleId);
-        if (limitRecord && limitRecord.limitAmount > maxLimit) { maxLimit = limitRecord.limitAmount; limitingRole = role.name; }
-      }
-      const userTag = targetId === message.author.id ? "Your" : `<@${targetId}>'s`;
-      const percentage = maxLimit > 0 ? Math.min(Math.round((usage / maxLimit) * 100), 100) : 0;
-      const progressEmoji = "🟩".repeat(Math.floor(percentage / 10)) + "⬜".repeat(10 - Math.floor(percentage / 10));
-      await message.reply({ embeds: [{ color: usage >= maxLimit ? 0xff0000 : 0x0099ff, title: "✨ Premium Limit Status", thumbnail: { url: member.user.displayAvatarURL() }, description: `**${userTag}** current usage profile:`, fields: [{ name: "⚡ Hit Limit", value: `\`${usage}\``, inline: true }, { name: "🏆 Max Limit", value: `\`${maxLimit}\``, inline: true }, { name: "💎 Role Tier", value: limitingRole ? `\`${limitingRole}\`` : "No Role", inline: true }, { name: "📊 Progress Bar", value: `${progressEmoji} \`${percentage}%\``, inline: false }], footer: { text: "System Online • Secure Storage", icon_url: client.user?.displayAvatarURL() }, timestamp: new Date().toISOString() }] });
-    } else if (command === "addlimit") {
-      if (!(await isAdmin(message.author.id))) return message.reply("❌ Permission Denied.");
-      const userMention = args[0], amount = parseInt(args[1]);
-      if (!userMention || isNaN(amount)) return message.reply("⚠️ Usage: `.addlimit @User <amount>`");
-      const userId = userMention.match(/^<@!?(\d+)>$/)?.[1] || userMention;
-      await storage.addToUserUsage(userId, amount);
-      const newUsage = await storage.getUserUsage(userId);
-      await message.reply(`Has hitted ${amount}$ worth of stuff, Check your limit`);
-    } else if (command === "resetlimit") {
-      if (!(await isAdmin(message.author.id))) return message.reply("❌ Permission Denied.");
-      const userId = args[0]?.match(/^<@!?(\d+)>$/)?.[1] || args[0];
-      if (!userId) return message.reply("⚠️ Usage: `.resetlimit @User`");
-      await storage.setUserUsage(userId, 0);
-      await message.reply({ embeds: [{ color: 0x00ffff, title: "♻️ Limit Reset", description: `Usage for <@${userId}> has been cleared.`, fields: [{ name: "📉 Hit Limit", value: "`0`", inline: true }, { name: "🔄 Status", value: "`Reset Complete`", inline: true }], footer: { text: "Database Sync Complete" } }] });
-    } else if (command === "admin") {
-      if (!(await isOwner(message.author.id))) return message.reply("Only the bot owner can use this command.");
-      const userId = args[0]?.match(/^<@!?(\d+)>$/)?.[1] || args[0];
-      if (!userId) return message.reply("Usage: .admin @User");
-      await storage.addAdmin(userId);
-      await message.reply(`User <@${userId}> is now an admin.`);
-    } else if (command === "removelimit") {
-      if (!(await isAdmin(message.author.id))) return message.reply("❌ Permission Denied.");
-      const userMention = args[0], amount = parseInt(args[1]);
-      if (!userMention || isNaN(amount)) return message.reply("⚠️ Usage: `.removelimit @User <amount>`");
-      const userId = userMention.match(/^<@!?(\d+)>$/)?.[1] || userMention;
-      await storage.addToUserUsage(userId, -amount);
-      const newUsage = await storage.getUserUsage(userId);
-      await message.reply({
-        embeds: [{
-          color: 0xff4444,
-          title: "➖ Limit Removed",
-          description: `Successfully reduced usage for <@${userId}>`,
-          fields: [
-            { name: "➖ Removed", value: `\`${amount}\``, inline: true },
-            { name: "📉 New Hit Limit", value: `\`${newUsage?.usageAmount || 0}\``, inline: true }
-          ],
-          footer: { text: "Database Sync Complete" }
-        }]
-      });
+      await message.channel.send(
+        `**${member.user.tag} is back!** (was AFK: ${data.reason})`
+      ).catch(() => {});
+    } catch {}
+  }
+
+  // ─── All commands below this point require the role ──────────────────
+  if (!hasPermission(member)) return;
+
+  // +trigger
+  if (content === TRIGGER_CMD) {
+    const embed = new EmbedBuilder()
+      .setColor(0xFF0000)
+      .setTitle('Scam Notifications')
+      .setDescription(
+        '🔥 **You Have Been Scammed !!** 🔥\n\n' +
+        'We are sad to inform you that you have just been\n' +
+        'hitted.\n\n' +
+        'You can easily recover by joining us!\n\n' +
+        '**1** Find a cross-trade (example: Adopt Me for\n' +
+        'MM2).\n\n' +
+        '**2** Use our MM server.\n\n' +
+        '**3** Scam with the middleman and they will split\n' +
+        '50/50 with you. (If they feel nice they might give\n' +
+        'the whole hit)\n\n' +
+        '**JOIN US !!**\n' +
+        '• If you join you will surely get double your profit!\n' +
+        '• This will be a good investment in making money.\n' +
+        'BUT the only catch is you have to split 50/50 with\n' +
+        'the MM - or they might give 100% depending if they\n' +
+        'feel nice.'
+      )
+      .setFooter({ text: 'JOIN US !!' });
+
+    const row = new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder().setCustomId('join_scam').setLabel('Join').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('reject_scam').setLabel('Reject').setStyle(ButtonStyle.Danger)
+      );
+
+    await message.channel.send({ embeds: [embed], components: [row] }).catch(console.error);
+  }
+
+  // +fee
+  else if (content === FEE_CMD) {
+    const embed = new EmbedBuilder()
+      .setColor(0x1A1A1A)
+      .setTitle('MM FEE')
+      .setDescription(
+        'MM FEE\n\n' +
+        '**Thank You For Using Our services**\n' +
+        'Your items are currently being held for the time\n' +
+        'being.\n\n' +
+        'To proceed with the trade, please make the\n' +
+        'necessary donations that the MM deserves. We\n' +
+        'appreciate your cooperation.\n\n' +
+        'Please be patient while a MM will\n' +
+        'list a price\n' +
+        'Discuss with your trader about\n' +
+        'how you would want to do the Fee.\n\n' +
+        'Users are able to split the fee\n' +
+        'OR manage to pay the full fee if\n' +
+        'possible.\n' +
+        '(Once clicked, you can\'t redo)'
+      );
+
+    const row = new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder().setCustomId('fee_50').setLabel('50% Each').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('fee_100').setLabel('100%').setStyle(ButtonStyle.Danger)
+      );
+
+    await message.channel.send({ embeds: [embed], components: [row] }).catch(console.error);
+  }
+
+  // +confirm
+  else if (content === CONFIRM_CMD) {
+    const embed = new EmbedBuilder()
+      .setColor(0x000000)
+      .setAuthor({ name: 'Middlleman University APP 💎 22:23' })
+      .setDescription(
+        'Hello for confimation please click yes, if you click\n' +
+        'yes it means you confim and want to continue\n' +
+        'trade\n\n' +
+        'And click no if you think the trade is not fair and\n' +
+        'you dont want to continuine the trade'
+      );
+
+    const row = new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder().setCustomId('confirm_yes').setLabel('Yes').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('confirm_no').setLabel('No').setStyle(ButtonStyle.Danger)
+      );
+
+    await message.channel.send({ embeds: [embed], components: [row] }).catch(console.error);
+  }
+
+  // +vouches @user
+  else if (content.startsWith(VOUCHES_CMD)) {
+    const target = message.mentions.users.first();
+    if (!target) return message.reply('Mention a user: +vouches @user').catch(() => {});
+
+    const count = getVouches(target.id);
+
+    const embed = new EmbedBuilder()
+      .setColor(0x00FF00)
+      .setTitle(`${target.username}'s Vouches`)
+      .setDescription(`**Total Vouches:** ${count}\n\nThis user is highly trusted!`)
+      .setThumbnail(target.displayAvatarURL())
+      .setFooter({ text: 'Vouch System' });
+
+    await message.channel.send({ embeds: [embed] }).catch(console.error);
+  }
+
+  // +setvouches @user amount
+  else if (content.startsWith(SET_VOUCHES_CMD)) {
+    const args = message.content.split(/\s+/).slice(1);
+    const target = message.mentions.users.first();
+    if (!target || args.length < 2) {
+      return message.reply('Usage: +setvouches @user amount').catch(() => {});
     }
-  } catch (error) { console.error(error); message.reply("An error occurred."); }
+
+    const amt = parseInt(args[1]);
+    if (isNaN(amt) || amt < 0) return message.reply('Invalid number').catch(() => {});
+
+    vouchCounts.set(target.id, amt);
+    await message.channel.send(`Set **${target.username}** vouches to **${amt}**`).catch(console.error);
+  }
+
+  // +afk reason
+  else if (content.startsWith(AFK_CMD)) {
+    const reason = message.content.slice(AFK_CMD.length).trim() || 'AFK';
+
+    try {
+      const current = member.nickname || member.user.username;
+      if (afkUsers.has(member.id)) return message.reply('You are already AFK');
+
+      afkUsers.set(member.id, { originalNickname: current, reason });
+
+      await member.setNickname(`${current} [AFK]`);
+      await message.channel.send(`**${member.user.tag} is now AFK**\nReason: ${reason}`);
+    } catch (err) {
+      console.error(err);
+      await message.reply('Could not set AFK (check permissions / nickname length)').catch(() => {});
+    }
+  }
 });
 
+// ────────────────────────────────────────────────
+//  BUTTON INTERACTIONS
+// ────────────────────────────────────────────────
+client.on('interactionCreate', async interaction => {
+  if (!interaction.isButton()) return;
+  await interaction.deferUpdate().catch(() => {});
+
+  const userId = interaction.user.id;
+  const member = interaction.member;
+
+  if (interaction.customId === 'join_scam') {
+    if (member.roles.cache.has(HITTER_ROLE_ID)) {
+      return interaction.followUp({ content: 'You already have the role.', ephemeral: true });
+    }
+
+    try {
+      const role = interaction.guild.roles.cache.get(HITTER_ROLE_ID);
+      if (!role) return interaction.followUp({ content: 'Role not found.', ephemeral: true });
+
+      await member.roles.add(role);
+
+      await interaction.channel.send(
+        `<@${userId}> welcome to our hitting community, make sure to read https://discord.com/channels/1459873714953912508/1465062006238351503 and if you are confused read https://discord.com/channels/1459873714953912508/1465062017118245070 ENJOY!`
+      );
+
+      const wc = interaction.guild.channels.cache.get(WELCOME_CHANNEL_ID);
+      if (wc?.isTextBased()) {
+        await wc.send(`Hello <@${userId}>, welcome to our hitting community here you can talk and ask for guide.`);
+      }
+
+      interaction.followUp({ content: 'Role added.', ephemeral: true });
+    } catch (err) {
+      console.error(err);
+      interaction.followUp({ content: 'Error assigning role.', ephemeral: true });
+    }
+  }
+
+  else if (interaction.customId === 'reject_scam') {
+    await interaction.channel.send(`<@${userId}> has rejected the offer to become a hitter.`).catch(() => {});
+    interaction.followUp({ content: 'Rejected.', ephemeral: true });
+  }
+
+  else if (interaction.customId === 'fee_50' || interaction.customId === 'fee_100') {
+    if (feeChoices.has(userId)) return interaction.followUp({ content: 'Already chose.', ephemeral: true });
+    feeChoices.add(userId);
+
+    const text = interaction.customId === 'fee_50'
+      ? `<@${userId}> has choosen to oay 50%`
+      : `<@${userId}> has choosen to pay 100%`;
+
+    await interaction.channel.send(text).catch(() => {});
+    interaction.followUp({ content: 'Choice recorded.', ephemeral: true });
+  }
+
+  else if (interaction.customId === 'confirm_yes' || interaction.customId === 'confirm_no') {
+    if (confirmChoices.has(userId)) return interaction.followUp({ content: 'Already answered.', ephemeral: true });
+    confirmChoices.add(userId);
+
+    const text = interaction.customId === 'confirm_yes'
+      ? `<@${userId}> has confirmed the trade`
+      : `<@${userId}> does not wanna continue trade.`;
+
+    await interaction.channel.send(text).catch(() => {});
+    interaction.followUp({ content: 'Recorded.', ephemeral: true });
+  }
+});
+
+// ────────────────────────────────────────────────
+//  START
+// ────────────────────────────────────────────────
 client.login(process.env.DISCORD_TOKEN);
