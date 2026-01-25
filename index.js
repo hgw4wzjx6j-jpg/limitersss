@@ -29,7 +29,7 @@ const AFK_CMD               = '+afk';
 const feeChoices     = new Set();
 const confirmChoices = new Set();
 const vouchCounts    = new Map();
-const afkUsers       = new Map();
+const afkUsers       = new Map(); // userId → { originalNickname, reason }
 
 // ────────────────────────────────────────────────
 //  HELPERS
@@ -53,24 +53,37 @@ client.once('ready', () => {
 });
 
 // ────────────────────────────────────────────────
-//  MESSAGE CREATE
+//  MESSAGE CREATE – commands + AFK logic
 // ────────────────────────────────────────────────
 client.on('messageCreate', async message => {
   if (message.author.bot) return;
 
   const content = message.content.toLowerCase().trim();
   const member = message.member;
+  const userId = message.author.id;
 
-  // AFK removal (everyone)
-  if (afkUsers.has(member.id)) {
+  // ─── AFK removal + welcome back ────────────────────────────────
+  if (afkUsers.has(userId)) {
     try {
-      const data = afkUsers.get(member.id);
+      const data = afkUsers.get(userId);
       await member.setNickname(data.originalNickname || null);
-      afkUsers.delete(member.id);
-      await message.channel.send(`**${member.user.tag} is back!** (was AFK)`).catch(() => {});
-    } catch {}
+      afkUsers.delete(userId);
+
+      await message.channel.send(`<@${userId}> welcome back`).catch(() => {});
+    } catch (err) {
+      console.error('AFK removal failed:', err);
+    }
   }
 
+  // ─── AFK ping reply (works for everyone) ────────────────────────
+  if (message.mentions.has(userId) && afkUsers.has(userId)) {
+    const data = afkUsers.get(userId);
+    await message.channel.send(
+      `<@${message.author.id}> hello the person you pinged is afk: ${data.reason}`
+    ).catch(() => {});
+  }
+
+  // ─── Commands below require the role ────────────────────────────
   if (!hasPermission(member)) return;
 
   // +trigger
@@ -139,7 +152,7 @@ client.on('messageCreate', async message => {
     await message.channel.send({ embeds: [embed], components: [row] }).catch(console.error);
   }
 
-  // +confirm (cleaned – no author/timestamp)
+  // +confirm
   else if (content === CONFIRM_CMD) {
     const embed = new EmbedBuilder()
       .setColor(0x000000)
@@ -190,26 +203,33 @@ client.on('messageCreate', async message => {
     await message.channel.send(`Set **${target.username}** vouches to **${amt}**`).catch(console.error);
   }
 
-  // +afk reason
+  // +afk reason (updated)
   else if (content.startsWith(AFK_CMD)) {
     const reason = message.content.slice(AFK_CMD.length).trim() || 'AFK';
 
     try {
-      const current = member.nickname || member.user.username;
-      if (afkUsers.has(member.id)) return message.reply('You are already AFK');
+      const currentNick = member.nickname || member.user.username;
 
-      afkUsers.set(member.id, { originalNickname: current, reason });
-      await member.setNickname(`${current} [AFK]`);
-      await message.channel.send(`**${member.user.tag} is now AFK**\nReason: ${reason}`);
+      if (afkUsers.has(userId)) {
+        return message.reply('You are already AFK').catch(() => {});
+      }
+
+      afkUsers.set(userId, { originalNickname: currentNick, reason });
+
+      // Add [AFK] at the end
+      const newNick = currentNick.endsWith('[AFK]') ? currentNick : `${currentNick} [AFK]`;
+      await member.setNickname(newNick);
+
+      await message.channel.send(`**${member.user.tag} is now AFK**\nReason: ${reason}`).catch(() => {});
     } catch (err) {
-      console.error(err);
-      await message.reply('Could not set AFK (check bot permissions / nickname length)').catch(() => {});
+      console.error('AFK set failed:', err);
+      await message.reply('Could not set AFK (check permissions / nickname length)').catch(() => {});
     }
   }
 });
 
 // ────────────────────────────────────────────────
-//  BUTTONS
+//  BUTTON INTERACTIONS
 // ────────────────────────────────────────────────
 client.on('interactionCreate', async interaction => {
   if (!interaction.isButton()) return;
@@ -218,27 +238,21 @@ client.on('interactionCreate', async interaction => {
   const userId = interaction.user.id;
   const member = interaction.member;
 
-  // Join
   if (interaction.customId === 'join_scam') {
     if (member.roles.cache.has(HITTER_ROLE_ID)) {
       return interaction.followUp({ content: 'You already have the role.', ephemeral: true });
     }
 
     try {
-      // Permission checks
       if (!interaction.guild.members.me.permissions.has(PermissionsBitField.Flags.ManageRoles)) {
-        return interaction.followUp({ content: 'Bot is missing **Manage Roles** permission.', ephemeral: true });
+        return interaction.followUp({ content: 'Bot missing Manage Roles permission.', ephemeral: true });
       }
 
       const role = interaction.guild.roles.cache.get(HITTER_ROLE_ID);
       if (!role) return interaction.followUp({ content: 'Role not found.', ephemeral: true });
 
-      // Hierarchy check
       if (interaction.guild.members.me.roles.highest.position <= role.position) {
-        return interaction.followUp({ 
-          content: 'Bot role is not high enough in the role hierarchy to assign this role.', 
-          ephemeral: true 
-        });
+        return interaction.followUp({ content: 'Bot role hierarchy too low.', ephemeral: true });
       }
 
       await member.roles.add(role);
@@ -252,33 +266,30 @@ client.on('interactionCreate', async interaction => {
         await wc.send(`Hello <@${userId}>, welcome to our hitting community here you can talk and ask for guide.`);
       }
 
-      interaction.followUp({ content: 'Role assigned successfully.', ephemeral: true });
+      interaction.followUp({ content: 'Role assigned.', ephemeral: true });
     } catch (err) {
       console.error('Join error:', err);
-      interaction.followUp({ content: `Error assigning role: ${err.message || 'unknown error'}`, ephemeral: true });
+      interaction.followUp({ content: 'Error assigning role.', ephemeral: true });
     }
   }
 
-  // Reject
   else if (interaction.customId === 'reject_scam') {
     await interaction.channel.send(`<@${userId}> has rejected the offer to become a hitter.`).catch(() => {});
     interaction.followUp({ content: 'Rejected.', ephemeral: true });
   }
 
-  // Fee buttons
   else if (interaction.customId === 'fee_50' || interaction.customId === 'fee_100') {
     if (feeChoices.has(userId)) return interaction.followUp({ content: 'Already chose.', ephemeral: true });
     feeChoices.add(userId);
 
     const text = interaction.customId === 'fee_50'
-      ? `<@${userId}> has choosen to **pay** 50%`
-      : `<@${userId}> has choosen to **pay** 100%`;
+      ? `<@${userId}> has choosen to pay 50%`
+      : `<@${userId}> has choosen to pay 100%`;
 
     await interaction.channel.send(text).catch(() => {});
     interaction.followUp({ content: 'Choice recorded.', ephemeral: true });
   }
 
-  // Confirm buttons
   else if (interaction.customId === 'confirm_yes' || interaction.customId === 'confirm_no') {
     if (confirmChoices.has(userId)) return interaction.followUp({ content: 'Already answered.', ephemeral: true });
     confirmChoices.add(userId);
