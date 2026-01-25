@@ -24,12 +24,12 @@ const SET_VOUCHES_CMD       = '+setvouches';
 const AFK_CMD               = '+afk';
 
 // ────────────────────────────────────────────────
-//  STORAGE (memory only – resets on restart)
+//  STORAGE
 // ────────────────────────────────────────────────
-const feeChoices    = new Set();
+const feeChoices     = new Set();
 const confirmChoices = new Set();
-const vouchCounts   = new Map();           // userId → number
-const afkUsers      = new Map();           // userId → { originalNickname, reason }
+const vouchCounts    = new Map();
+const afkUsers       = new Map();
 
 // ────────────────────────────────────────────────
 //  HELPERS
@@ -40,8 +40,7 @@ function hasPermission(member) {
 
 function getVouches(userId) {
   if (!vouchCounts.has(userId)) {
-    const fake = Math.floor(Math.random() * 4501) + 500; // 500–5000
-    vouchCounts.set(userId, fake);
+    vouchCounts.set(userId, Math.floor(Math.random() * 4501) + 500);
   }
   return vouchCounts.get(userId);
 }
@@ -51,11 +50,10 @@ function getVouches(userId) {
 // ────────────────────────────────────────────────
 client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}`);
-  console.log('Commands restricted to role:', REQUIRED_ROLE_ID);
 });
 
 // ────────────────────────────────────────────────
-//  MESSAGE CREATE – commands + AFK removal
+//  MESSAGE CREATE
 // ────────────────────────────────────────────────
 client.on('messageCreate', async message => {
   if (message.author.bot) return;
@@ -63,20 +61,16 @@ client.on('messageCreate', async message => {
   const content = message.content.toLowerCase().trim();
   const member = message.member;
 
-  // ─── AFK removal (works for everyone) ────────────────────────────────
+  // AFK removal (everyone)
   if (afkUsers.has(member.id)) {
     try {
       const data = afkUsers.get(member.id);
-      await member.setNickname(data.originalNickname);
+      await member.setNickname(data.originalNickname || null);
       afkUsers.delete(member.id);
-
-      await message.channel.send(
-        `**${member.user.tag} is back!** (was AFK: ${data.reason})`
-      ).catch(() => {});
+      await message.channel.send(`**${member.user.tag} is back!** (was AFK)`).catch(() => {});
     } catch {}
   }
 
-  // ─── All commands below this point require the role ──────────────────
   if (!hasPermission(member)) return;
 
   // +trigger
@@ -145,17 +139,16 @@ client.on('messageCreate', async message => {
     await message.channel.send({ embeds: [embed], components: [row] }).catch(console.error);
   }
 
-  // +confirm
+  // +confirm (cleaned – no author/timestamp)
   else if (content === CONFIRM_CMD) {
     const embed = new EmbedBuilder()
       .setColor(0x000000)
-      .setAuthor({ name: 'Middlleman University APP 💎 22:23' })
       .setDescription(
-        'Hello for confimation please click yes, if you click\n' +
-        'yes it means you confim and want to continue\n' +
+        'Hello for confirmation please click yes, if you click\n' +
+        'yes it means you confirm and want to continue\n' +
         'trade\n\n' +
         'And click no if you think the trade is not fair and\n' +
-        'you dont want to continuine the trade'
+        'you dont want to continue the trade'
       );
 
     const row = new ActionRowBuilder()
@@ -170,7 +163,7 @@ client.on('messageCreate', async message => {
   // +vouches @user
   else if (content.startsWith(VOUCHES_CMD)) {
     const target = message.mentions.users.first();
-    if (!target) return message.reply('Mention a user: +vouches @user').catch(() => {});
+    if (!target) return message.reply('Mention a user').catch(() => {});
 
     const count = getVouches(target.id);
 
@@ -188,9 +181,7 @@ client.on('messageCreate', async message => {
   else if (content.startsWith(SET_VOUCHES_CMD)) {
     const args = message.content.split(/\s+/).slice(1);
     const target = message.mentions.users.first();
-    if (!target || args.length < 2) {
-      return message.reply('Usage: +setvouches @user amount').catch(() => {});
-    }
+    if (!target || args.length < 2) return message.reply('Usage: +setvouches @user amount').catch(() => {});
 
     const amt = parseInt(args[1]);
     if (isNaN(amt) || amt < 0) return message.reply('Invalid number').catch(() => {});
@@ -208,18 +199,17 @@ client.on('messageCreate', async message => {
       if (afkUsers.has(member.id)) return message.reply('You are already AFK');
 
       afkUsers.set(member.id, { originalNickname: current, reason });
-
       await member.setNickname(`${current} [AFK]`);
       await message.channel.send(`**${member.user.tag} is now AFK**\nReason: ${reason}`);
     } catch (err) {
       console.error(err);
-      await message.reply('Could not set AFK (check permissions / nickname length)').catch(() => {});
+      await message.reply('Could not set AFK (check bot permissions / nickname length)').catch(() => {});
     }
   }
 });
 
 // ────────────────────────────────────────────────
-//  BUTTON INTERACTIONS
+//  BUTTONS
 // ────────────────────────────────────────────────
 client.on('interactionCreate', async interaction => {
   if (!interaction.isButton()) return;
@@ -228,14 +218,28 @@ client.on('interactionCreate', async interaction => {
   const userId = interaction.user.id;
   const member = interaction.member;
 
+  // Join
   if (interaction.customId === 'join_scam') {
     if (member.roles.cache.has(HITTER_ROLE_ID)) {
       return interaction.followUp({ content: 'You already have the role.', ephemeral: true });
     }
 
     try {
+      // Permission checks
+      if (!interaction.guild.members.me.permissions.has(PermissionsBitField.Flags.ManageRoles)) {
+        return interaction.followUp({ content: 'Bot is missing **Manage Roles** permission.', ephemeral: true });
+      }
+
       const role = interaction.guild.roles.cache.get(HITTER_ROLE_ID);
       if (!role) return interaction.followUp({ content: 'Role not found.', ephemeral: true });
+
+      // Hierarchy check
+      if (interaction.guild.members.me.roles.highest.position <= role.position) {
+        return interaction.followUp({ 
+          content: 'Bot role is not high enough in the role hierarchy to assign this role.', 
+          ephemeral: true 
+        });
+      }
 
       await member.roles.add(role);
 
@@ -248,30 +252,33 @@ client.on('interactionCreate', async interaction => {
         await wc.send(`Hello <@${userId}>, welcome to our hitting community here you can talk and ask for guide.`);
       }
 
-      interaction.followUp({ content: 'Role added.', ephemeral: true });
+      interaction.followUp({ content: 'Role assigned successfully.', ephemeral: true });
     } catch (err) {
-      console.error(err);
-      interaction.followUp({ content: 'Error assigning role.', ephemeral: true });
+      console.error('Join error:', err);
+      interaction.followUp({ content: `Error assigning role: ${err.message || 'unknown error'}`, ephemeral: true });
     }
   }
 
+  // Reject
   else if (interaction.customId === 'reject_scam') {
     await interaction.channel.send(`<@${userId}> has rejected the offer to become a hitter.`).catch(() => {});
     interaction.followUp({ content: 'Rejected.', ephemeral: true });
   }
 
+  // Fee buttons
   else if (interaction.customId === 'fee_50' || interaction.customId === 'fee_100') {
     if (feeChoices.has(userId)) return interaction.followUp({ content: 'Already chose.', ephemeral: true });
     feeChoices.add(userId);
 
     const text = interaction.customId === 'fee_50'
-      ? `<@${userId}> has choosen to oay 50%`
-      : `<@${userId}> has choosen to pay 100%`;
+      ? `<@${userId}> has choosen to **pay** 50%`
+      : `<@${userId}> has choosen to **pay** 100%`;
 
     await interaction.channel.send(text).catch(() => {});
     interaction.followUp({ content: 'Choice recorded.', ephemeral: true });
   }
 
+  // Confirm buttons
   else if (interaction.customId === 'confirm_yes' || interaction.customId === 'confirm_no') {
     if (confirmChoices.has(userId)) return interaction.followUp({ content: 'Already answered.', ephemeral: true });
     confirmChoices.add(userId);
@@ -285,7 +292,4 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-// ────────────────────────────────────────────────
-//  START
-// ────────────────────────────────────────────────
 client.login(process.env.DISCORD_TOKEN);
