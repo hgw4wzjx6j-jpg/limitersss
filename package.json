@@ -1,18 +1,18 @@
 {
-  "name": "hitter-bot",
+  "name": "discord-hitter-bot",
   "version": "1.0.0",
-  "description": "Discord utility bot",
+  "description": "Staff bot for hitting / middleman community",
   "main": "index.js",
-  "type": "module",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "discord.js": "^14.16.3",
-    "node-fetch": "^3.3.2"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "node-fetch": "^2.7.0"
   },
   "author": "",
   "license": "ISC"
