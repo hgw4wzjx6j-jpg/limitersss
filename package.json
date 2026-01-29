@@ -1,7 +1,6 @@
 {
-  "name": "discord-hitter-bot",
+  "name": "discord-invites-bot",
   "version": "1.0.0",
-  "description": "Staff bot for hitting / middleman community",
   "main": "index.js",
   "type": "commonjs",
   "engines": {
@@ -11,9 +10,6 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "discord.js": "^14.16.3",
-    "node-fetch": "^2.7.0"
-  },
-  "author": "",
-  "license": "ISC"
+    "discord.js": "^14.16.3"
+  }
 }
