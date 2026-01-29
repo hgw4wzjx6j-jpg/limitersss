@@ -1,18 +1,19 @@
 {
-  "name": "scam-flow-bot",
+  "name": "hitter-bot",
   "version": "1.0.0",
-  "description": "Discord bot with multiple custom commands",
+  "description": "Discord utility bot",
   "main": "index.js",
   "type": "module",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "discord.js": "^14.17.3"
+    "discord.js": "^14.16.3",
+    "node-fetch": "^3.3.2"
   },
   "engines": {
     "node": ">=18.0.0"
   },
   "author": "",
-  "license": "UNLICENSED"
+  "license": "ISC"
 }
