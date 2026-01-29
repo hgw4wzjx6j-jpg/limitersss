@@ -1,5 +1,5 @@
-import { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, Collection, PermissionsBitField } from 'discord.js';
-import fetch from 'node-fetch';
+const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, Collection, PermissionsBitField } = require('discord.js');
+const fetch = require('node-fetch');
 
 const client = new Client({
   intents: [
@@ -13,7 +13,7 @@ const client = new Client({
 });
 
 // ────────────────────────────────────────────────
-// CONFIG
+// CONFIG ── CHANGE THESE VALUES
 // ────────────────────────────────────────────────
 const STAFF_ROLE_ID      = '1465061909668565038';
 const HITTER_ROLE_ID     = '1465061911329767477';
@@ -30,7 +30,7 @@ const usedButtons = new Collection(); // messageId → Set<userId>
 // ────────────────────────────────────────────────
 client.once('ready', () => {
   console.log(`[${new Date().toUTCString()}] Logged in as ${client.user.tag} | Prefix: ${PREFIX}`);
-  console.log(`Node version: ${process.version} | discord.js v${client.constructor.version}`);
+  console.log(`Node: ${process.version} | discord.js: v${require('discord.js').version}`);
 });
 
 // ────────────────────────────────────────────────
@@ -39,7 +39,7 @@ client.once('ready', () => {
 client.on('messageCreate', async message => {
   if (message.author.bot || !message.guild) return;
 
-  // AFK removal on any message
+  // AFK removal
   if (afkUsers.has(message.member.id)) {
     try {
       const data = afkUsers.get(message.member.id);
@@ -49,7 +49,7 @@ client.on('messageCreate', async message => {
     } catch {}
   }
 
-  // AFK ping response
+  // AFK ping reply
   if (message.mentions.has(message.member.id) && afkUsers.has(message.member.id)) {
     const reason = afkUsers.get(message.member.id).reason;
     message.channel.send(`<@${message.author.id}>, <@${message.member.id}> is **AFK**\nReason: ${reason}`).catch(() => {});
@@ -64,7 +64,7 @@ client.on('messageCreate', async message => {
 
   const member = message.member;
 
-  // Staff-only below this point
+  // All commands below this line are staff-only
   if (!member.roles.cache.has(STAFF_ROLE_ID)) {
     return message.reply('You need the staff role to use commands.');
   }
@@ -75,21 +75,22 @@ client.on('messageCreate', async message => {
       .setColor(0x00BFFF)
       .setTitle('Staff Commands – Prefix $')
       .setDescription(
-        '`$trigger`   → Scam join embed\n' +
-        '`$fee`       → MM fee buttons\n' +
-        '`$confirm`   → Trade yes/no\n' +
+        '`$trigger`     → Scam join embed\n' +
+        '`$fee`         → MM fee buttons\n' +
+        '`$confirm`     → Trade yes/no\n' +
         '`$vouches [@user]` → Show vouches\n' +
         '`$setvouches @user <num>` → Set vouches\n' +
         '`$clearvouches @user` → Reset vouches\n' +
         '`$afk [reason]` → Set AFK status\n' +
-        '`$steal <emoji or sticker> [name]` → Copy to server'
+        '`$steal <emoji/sticker> [name]` → Copy emoji/sticker\n' +
+        '`$invites`     → Send recruitment message'
       )
       .setFooter({ text: client.user.tag });
 
     return message.channel.send({ embeds: [embed] }).catch(console.error);
   }
 
-  // $trigger
+  // $trigger (scam embed)
   if (cmd === 'trigger') {
     const embed = new EmbedBuilder()
       .setColor(0xFF0000)
@@ -109,6 +110,7 @@ client.on('messageCreate', async message => {
     );
 
     await message.channel.send({ embeds: [embed], components: [row] }).catch(console.error);
+    return;
   }
 
   // $fee
@@ -128,6 +130,7 @@ client.on('messageCreate', async message => {
     );
 
     await message.channel.send({ embeds: [embed], components: [row] }).catch(console.error);
+    return;
   }
 
   // $confirm
@@ -142,6 +145,26 @@ client.on('messageCreate', async message => {
     );
 
     await message.channel.send({ embeds: [embed], components: [row] }).catch(console.error);
+    return;
+  }
+
+  // $invites ← NEW COMMAND
+  if (cmd === 'invites') {
+    const embed = new EmbedBuilder()
+      .setColor(0xFFD700)
+      .setTitle('You have been recruited')
+      .setDescription(
+        "Hello, you have been recruited.\n\n" +
+        "If you are looking for the **middleman role**, you have **3 choices**:\n\n" +
+        "1. **Buy it** with money / LTC\n" +
+        "2. **Hit 10 people** and show proof to Schior\n" +
+        "3. **Recruit 10 people** and make them join our hitting community\n\n" +
+        "**Make sure to read the middleman rules** — you will be tested later on."
+      )
+      .setFooter({ text: "Good luck • " + client.user.tag });
+
+    await message.channel.send({ embeds: [embed] }).catch(console.error);
+    return;
   }
 
   // $vouches
@@ -157,6 +180,7 @@ client.on('messageCreate', async message => {
       .setThumbnail(target.displayAvatarURL({ dynamic: true }));
 
     await message.channel.send({ embeds: [embed] });
+    return;
   }
 
   // $setvouches
@@ -168,6 +192,7 @@ client.on('messageCreate', async message => {
     }
     vouchCounts.set(target.id, amount);
     message.reply(`Set **${target.username}** vouches to **${amount}**`);
+    return;
   }
 
   // $clearvouches
@@ -176,6 +201,7 @@ client.on('messageCreate', async message => {
     if (!target) return message.reply('Mention a user');
     vouchCounts.delete(target.id);
     message.reply(`Cleared vouches for **${target.username}** (random next time)`);
+    return;
   }
 
   // $afk
@@ -191,22 +217,28 @@ client.on('messageCreate', async message => {
       message.reply('Failed to set AFK (bot missing Manage Nicknames permission?)');
       console.error(err);
     }
+    return;
   }
 
-  // $steal
+  // $steal (emoji/sticker stealer)
   if (cmd === 'steal') {
     if (!message.guild.members.me.permissions.has(PermissionsBitField.Flags.ManageEmojisAndStickers)) {
       return message.reply('Bot is missing **Manage Emojis and Stickers** permission.');
     }
 
-    if (args.length === 0) return message.reply('Usage: $steal <emoji or sticker> [new-name]');
+    if (args.length === 0) {
+      return message.reply('Usage: $steal <emoji or sticker> [new-name]\nPaste it directly or reply to a message with one.');
+    }
 
-    const nameArg = args[1] ? args[1].replace(/[^a-z0-9_]/gi, '').slice(0, 32) : 'stolen';
+    const nameArg = args[1] 
+      ? args[1].replace(/[^a-z0-9_]/gi, '').slice(0, 32) 
+      : 'stolen';
+
     let url = null;
     let isSticker = false;
     let finalName = nameArg;
 
-    // Emoji
+    // Emoji regex
     const emojiMatch = content.match(/<a?:[a-zA-Z0-9_]+:(\d+)>/);
     if (emojiMatch) {
       const id = emojiMatch[1];
@@ -221,7 +253,9 @@ client.on('messageCreate', async message => {
       finalName = nameArg || sticker.name?.replace(/[^a-z0-9_]/gi, '') || 'stolen';
     }
 
-    if (!url) return message.reply('Could not detect emoji or sticker. Paste it directly or reply to a message containing one.');
+    if (!url) {
+      return message.reply('Could not detect emoji or sticker. Paste it directly or reply to a message containing one.');
+    }
 
     try {
       const res = await fetch(url);
@@ -237,7 +271,7 @@ client.on('messageCreate', async message => {
         message.reply(`Sticker **${sticker.name}** added!\n${sticker.url}`);
       } else {
         const emoji = await message.guild.emojis.create({
-          attachment: buffer,
+          file: buffer,
           name: finalName
         });
         message.reply(`Emoji **:${emoji.name}:** added! ${emoji}`);
@@ -251,11 +285,15 @@ client.on('messageCreate', async message => {
       else reply += `Error: ${err.message}`;
       message.reply(reply);
     }
+    return;
   }
+
+  // Unknown command
+  message.reply(`Unknown command. Use **$cmds** to see available commands.`);
 });
 
 // ────────────────────────────────────────────────
-// BUTTON HANDLER
+// BUTTON INTERACTIONS
 // ────────────────────────────────────────────────
 client.on('interactionCreate', async interaction => {
   if (!interaction.isButton()) return;
@@ -268,4 +306,57 @@ client.on('interactionCreate', async interaction => {
   const used = usedButtons.get(msgId);
 
   if (used.has(userId)) {
-    return interaction.followUp({ content: 'You already used a button on this message.', ephemeral
+    return interaction.followUp({ content: 'You already used a button on this message.', ephemeral: true });
+  }
+  used.add(userId);
+
+  try {
+    if (interaction.customId === 'join_scam') {
+      await interaction.member.roles.add(HITTER_ROLE_ID);
+      await interaction.channel.send(`<@${userId}> → Welcome to the community! Check rules & guide.`);
+      const wc = interaction.guild.channels.cache.get(WELCOME_CHANNEL_ID);
+      if (wc?.isTextBased()) {
+        await wc.send(`Hello <@${userId}>, feel free to ask anything here.`).catch(() => {});
+      }
+      interaction.followUp({ content: 'Hitter role assigned', ephemeral: true });
+    }
+
+    else if (interaction.customId === 'reject_scam') {
+      await interaction.channel.send(`<@${userId}> rejected the offer.`);
+      interaction.followUp({ content: 'Rejected', ephemeral: true });
+    }
+
+    else if (interaction.customId === 'fee_50') {
+      await interaction.channel.send(`<@${userId}> selected **50% each**`);
+      interaction.followUp({ content: 'Choice saved', ephemeral: true });
+    }
+    else if (interaction.customId === 'fee_100') {
+      await interaction.channel.send(`<@${userId}> selected **100% full fee**`);
+      interaction.followUp({ content: 'Choice saved', ephemeral: true });
+    }
+
+    else if (interaction.customId === 'confirm_yes') {
+      await interaction.channel.send(`<@${userId}> **confirmed** the trade`);
+      interaction.followUp({ content: 'Choice saved', ephemeral: true });
+    }
+    else if (interaction.customId === 'confirm_no') {
+      await interaction.channel.send(`<@${userId}> **declined** the trade`);
+      interaction.followUp({ content: 'Choice saved', ephemeral: true });
+    }
+  } catch (err) {
+    console.error(err);
+    interaction.followUp({ content: 'Action failed (check bot permissions)', ephemeral: true });
+  }
+});
+
+// ─── LOGIN ───
+if (!process.env.TOKEN) {
+  console.error('ERROR: No TOKEN environment variable set.');
+  console.error('On Railway → go to Variables tab and add: TOKEN = your_bot_token_here');
+  process.exit(1);
+}
+
+client.login(process.env.TOKEN).catch(err => {
+  console.error('Login failed:', err.message);
+  process.exit(1);
+});
