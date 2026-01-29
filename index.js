@@ -15,9 +15,6 @@ const client = new Client({
 const STAFF_ROLE_ID = '1465061909668565038';
 const PREFIX = '$';
 
-// Only keep AFK if you still want it (optional – can be removed too)
-const afkUsers = new Map();
-
 // ────────────────────────────────────────────────
 // READY
 // ────────────────────────────────────────────────
@@ -26,26 +23,10 @@ client.once('ready', () => {
 });
 
 // ────────────────────────────────────────────────
-// MESSAGE CREATE – ONLY $invites + basic AFK
+// MESSAGE CREATE – ONLY $invites
 // ────────────────────────────────────────────────
 client.on('messageCreate', async message => {
   if (message.author.bot || !message.guild) return;
-
-  // Optional: AFK removal on any message
-  if (afkUsers.has(message.member.id)) {
-    try {
-      const data = afkUsers.get(message.member.id);
-      await message.member.setNickname(data.originalNickname || null);
-      afkUsers.delete(message.member.id);
-      message.channel.send(`<@${message.member.id}> welcome back!`).catch(() => {});
-    } catch {}
-  }
-
-  // Optional: AFK ping response
-  if (message.mentions.has(message.member.id) && afkUsers.has(message.member.id)) {
-    const reason = afkUsers.get(message.member.id).reason;
-    message.channel.send(`<@${message.author.id}>, <@${message.member.id}> is **AFK**\nReason: ${reason}`).catch(() => {});
-  }
 
   const content = message.content.trim();
   if (!content.startsWith(PREFIX)) return;
@@ -56,12 +37,10 @@ client.on('messageCreate', async message => {
 
   const member = message.member;
 
-  // Only staff can use $invites
   if (!member.roles.cache.has(STAFF_ROLE_ID)) {
     return message.reply('You need the staff role to use this command.');
   }
 
-  // ONLY COMMAND LEFT: $invites
   if (cmd === 'invites') {
     const embed = new EmbedBuilder()
       .setColor(0xFFD700)
@@ -71,25 +50,9 @@ client.on('messageCreate', async message => {
         "1. Buy it with money/ltc.\n" +
         "2. Hit 10 people and show Schior.\n" +
         "3. Recruit 10 people and make them join our hitting community.\n\n" +
-        "Make sure to read middleman rules as you will be tested later on."
+        "Make sure to read middleman rules as you will be tested later on.\n\n" +
+        "**Make sure to read https://discord.com/channels/1459873714953912508/1465062017118245070 and https://discord.com/channels/1459873714953912508/1465062006238351503**"
       )
       .setFooter({ text: client.user.tag });
 
-    await message.channel.send({ embeds: [embed] }).catch(console.error);
-    return;
-  }
-
-  // If someone tries any other command
-  message.reply('Only $invites is available. Type $invites to use it.');
-});
-
-// ─── LOGIN ───
-if (!process.env.TOKEN) {
-  console.error('ERROR: No TOKEN environment variable set. Add it in Railway variables.');
-  process.exit(1);
-}
-
-client.login(process.env.TOKEN).catch(err => {
-  console.error('Login failed:', err);
-  process.exit(1);
-});
+    await message.channel.send({ embeds: [embed] }).
